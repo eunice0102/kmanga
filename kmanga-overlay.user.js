@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         K-Manga Overlay Translator (Personal V2)
+// @name         K-Manga Overlay Translator (One-Tap V2.2)
 // @namespace    https://example.invalid/kmanga-personal
-// @version      2.0.0
+// @version      2.2.0
 // @description  在 Safari 韓漫網頁上把韓文翻成繁體中文並覆蓋對話位置（OCR/Gemini）
 // @match        https://bomtoon.com/*
 // @match        https://*.bomtoon.com/*
@@ -32,7 +32,7 @@
   const STORAGE = 'kmanga_v2_';
   const MODEL_OPTIONS = ['gemini-2.5-flash','gemini-2.5-flash-lite'];
   const state = { workerUrl:'', accessToken:'', mode:'ocr', model:MODEL_OPTIONS[0], glossary:'',
-    selecting:false, busy:false, worker:null, overlays:[], boxesHidden:false, stats:{requests:0,input:0,output:0,total:0}, cacheIndex:[] };
+    selecting:false, busy:false, worker:null, overlays:[], boxesHidden:false, stats:{requests:0,input:0,output:0,total:0}, cacheIndex:[], ready:false };
   const host = document.createElement('div');
   host.id = 'kmanga-translator-host';
   host.style.cssText = 'position:fixed!important;bottom:calc(18px + env(safe-area-inset-bottom))!important;right:12px!important;z-index:2147483647!important;pointer-events:auto!important;';
@@ -45,30 +45,31 @@
     .buttons{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:12px}.btn{border:0;border-radius:9px;min-height:39px;padding:8px;color:#fff;background:#3449c4;font-weight:600;cursor:pointer}
     .gray{background:#677188}.danger{background:#8b4343}.muted{font-size:11px;line-height:1.5;color:#667085;margin-top:8px}
     .status{font-size:12px;line-height:1.55;background:#f0f2f8;padding:9px;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere}
-    .topbutton{border:0;background:#edf0fa;border-radius:8px;padding:6px 9px;color:#263967;cursor:pointer}
+    .topbutton{border:0;background:#edf0fa;border-radius:8px;padding:6px 9px;color:#263967;cursor:pointer} .floatrow{display:flex;align-items:center;gap:5px} .smallfloat{border:0;border-radius:999px;background:#e8ebf9;color:#263967;box-shadow:0 5px 22px #0003;font-size:17px;padding:10px 12px;cursor:pointer}.remember{display:flex;align-items:center;gap:6px;font-size:12px}.remember input{width:auto}
   </style>
-  <button class="mini" id="float" type="button">韓漫翻譯</button>
+  <div class="floatrow" id="floatrow"><button class="mini" id="float" type="button">一鍵翻譯</button><button class="smallfloat" id="settings" type="button" aria-label="設定" title="設定">⚙</button></div>
   <section class="panel hidden" id="panel">
-   <header><strong>韓漫翻譯 V2</strong><button id="close" type="button" class="topbutton">收起 ✕</button></header>
+   <header><strong>韓漫翻譯 V2.2</strong><button id="close" type="button" class="topbutton">收起 ✕</button></header>
    <label for="url">Cloudflare Worker 網址</label><input id="url" placeholder="https://kmanga-proxy.xxx.workers.dev" inputmode="url" />
-   <label for="token">ACCESS_TOKEN（不是 Gemini API Key）</label><input id="token" type="password" autocomplete="off" placeholder="僅保存在此頁記憶體" />
+   <label for="token">ACCESS_TOKEN（不是 Gemini API Key）</label><input id="token" type="password" autocomplete="off" placeholder="輸入你在 Cloudflare 設定的存取碼" /><label class="remember"><input id="remember" type="checkbox" checked /> 在本裝置記住存取碼（不建議共用手機啟用）</label>
    <label for="mode">翻譯模式</label><select id="mode"><option value="ocr">省額度：OCR → Gemini</option><option value="vision">高品質：Gemini 看圖片</option></select>
    <label for="model">Gemini 模型</label><select id="model"><option>gemini-2.5-flash</option><option>gemini-2.5-flash-lite</option></select>
    <label for="glossary">角色姓名對照（可選）</label><textarea id="glossary" placeholder="주빈=晝濱；이경=以暻"></textarea>
    <div class="buttons">
     <button id="current" class="btn" type="button">翻譯目前畫面</button><button id="choose" class="btn" type="button">點選漫畫圖片</button>
     <button id="toggle" class="btn gray" type="button">隱藏／顯示中文</button><button id="clear" class="btn gray" type="button">清除本頁翻譯</button>
-    <button id="save" class="btn gray" type="button">儲存一般設定</button><button id="resetcache" class="btn danger" type="button">清除翻譯快取</button>
+    <button id="save" class="btn gray" type="button">儲存連線設定</button><button id="resetcache" class="btn danger" type="button">清除翻譯快取</button>
    </div>
-   <p class="status" id="status">先輸入 Worker 網址和 ACCESS_TOKEN，再按「翻譯目前畫面」。</p>
+   <p class="status" id="status">第一次請點 ⚙ 填寫 Worker 網址與 ACCESS_TOKEN，按儲存連線設定。之後按「一鍵翻譯」即可。</p>
    <div class="muted" id="usage">Gemini Token：尚未使用</div>
-   <p class="muted">文字是蓋在原圖上，不會修改或下載漫畫。若網站圖片受跨網域限制，瀏覽器可能禁止 OCR。可點中文區塊手動更正。</p>
+   <p class="muted">文字是蓋在原圖上，不會修改或下載漫畫。若網站圖片受跨網域限制，將先嘗試 Userscripts 跨網域重新載圖；若來源禁止存取，仍可能失敗。可點中文區塊手動更正。</p>
   </section>`;
   const q = (selector) => shadow.querySelector(selector);
   const status = (message) => { q('#status').textContent=String(message); };
-  function open() { q('#panel').classList.remove('hidden'); q('#float').classList.add('hidden'); }
-  function close() { q('#panel').classList.add('hidden'); q('#float').classList.remove('hidden'); }
-  q('#float').addEventListener('click',open);
+  function open() { q('#panel').classList.remove('hidden'); q('#floatrow').classList.add('hidden'); }
+  function close() { q('#panel').classList.add('hidden'); q('#floatrow').classList.remove('hidden'); }
+  q('#float').addEventListener('click',()=>{ if(!state.ready){open();status('設定尚未讀取完成，請再試一次。');return;} if(!state.workerUrl||!state.accessToken){open();status('第一次使用：請填寫 Worker 網址和 ACCESS_TOKEN，儲存一次即可。');return;} const candidates=findVisibleImages(); if(!candidates.length){open();return status('沒有找到可翻譯的漫畫圖片，請先滑到漫畫畫面。');} q('#float').textContent='翻譯中…'; translateImage(candidates[0].img); });
+  q('#settings').addEventListener('click',open);
   q('#close').addEventListener('click',close);
   (document.body||document.documentElement).appendChild(host);
 
@@ -83,19 +84,28 @@
     state.model=q('#model').value;
     state.glossary=q('#glossary').value.trim();
   }
-  async function saveSettings(){saveFormValues();await GM.setValue(STORAGE+'settings',{workerUrl:state.workerUrl,mode:state.mode,model:state.model,glossary:state.glossary});status('已儲存設定（不包含 ACCESS_TOKEN）。');}
+  async function saveSettings(){
+    saveFormValues();
+    await GM.setValue(STORAGE+'settings',{workerUrl:state.workerUrl,mode:state.mode,model:state.model,glossary:state.glossary});
+    if(q('#remember').checked){await GM.setValue(STORAGE+'saved_access_token',state.accessToken)}
+    else {await GM.deleteValue(STORAGE+'saved_access_token')}
+    status('設定已儲存。關閉面板後，直接點「一鍵翻譯」即可。'+(q('#remember').checked?'（存取碼保存在 Userscripts 本機儲存空間）':'（存取碼不會保存，重新載入須再輸入）'));
+  }
   q('#save').addEventListener('click',()=>saveSettings().catch(err=>status(err.message)));
   (async()=>{
     try {
       const prefs=await GM.getValue(STORAGE+'settings',{});
       q('#url').value=prefs.workerUrl||'';
+      q('#token').value=await GM.getValue(STORAGE+'saved_access_token','');
       q('#mode').value=prefs.mode||'ocr';
       q('#model').value=MODEL_OPTIONS.includes(prefs.model)?prefs.model:MODEL_OPTIONS[0];
       q('#glossary').value=prefs.glossary||'';
       state.stats=await GM.getValue(STORAGE+'stats',state.stats);
       state.cacheIndex=await GM.getValue(STORAGE+'index',[]);
+      saveFormValues();
       updateUsage();
     } catch(err){status('設定讀取失敗：'+err.message)}
+    finally{state.ready=true;}
   })();
   function updateUsage(){q('#usage').textContent=`此腳本累計：${state.stats.requests||0} 次 API，輸入 ${state.stats.input||0}、輸出 ${state.stats.output||0}、總計 ${state.stats.total||0} tokens（快取不計；不代表 Google 專案全部用量）`;}
   function usageTotals(usage) {
@@ -118,26 +128,78 @@
       .map(img=>{const r=img.getBoundingClientRect();const ix=Math.max(0,Math.min(vw,r.right)-Math.max(0,r.left));const iy=Math.max(0,Math.min(vh-30,r.bottom)-Math.max(0,r.top));return {img,area:ix*iy,rect:r};})
       .filter(x=>x.area>12000).sort((a,b)=>b.area-a.area);
   }
-  function captureVisible(img){
+  // Cross-origin comics images can be displayed but are not necessarily readable as Canvas pixels.
+  // First use the already-rendered image; if Safari rejects canvas export, attempt a second,
+  // permissioned GET of the identical <img> URL via the Userscripts extension. No cookies,
+  // authorization headers, scraping, or DRM bypass are added here.
+  async function captureVisible(img){
     const r=img.getBoundingClientRect();
     if(!r.width||!r.height||!img.naturalWidth||!img.naturalHeight)throw Error('圖片尚未載入完成。');
     const left=Math.max(0,r.left),top=Math.max(0,r.top),right=Math.min(innerWidth,r.right),bottom=Math.min(innerHeight-20,r.bottom);
     if(right-left<60||bottom-top<50)throw Error('請先把漫畫圖片滑動到畫面中央。');
     const source={x:Math.max(0,(left-r.left)/r.width),y:Math.max(0,(top-r.top)/r.height),w:(right-left)/r.width,h:(bottom-top)/r.height};
-    const sx=Math.max(0,Math.floor(source.x*img.naturalWidth)), sy=Math.max(0,Math.floor(source.y*img.naturalHeight));
+    const sx=Math.max(0,Math.floor(source.x*img.naturalWidth)),sy=Math.max(0,Math.floor(source.y*img.naturalHeight));
     const sw=Math.min(img.naturalWidth-sx,Math.ceil(source.w*img.naturalWidth)),sh=Math.min(img.naturalHeight-sy,Math.ceil(source.h*img.naturalHeight));
     const scale=Math.min(1,1550/sw,1900/sh);
     const canvas=document.createElement('canvas');
     canvas.width=Math.max(1,Math.round(sw*scale));canvas.height=Math.max(1,Math.round(sh*scale));
     const ctx=canvas.getContext('2d',{willReadFrequently:true});
-    ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
-    ctx.drawImage(img,sx,sy,sw,sh,0,0,canvas.width,canvas.height);
-    let dataUrl;
-    try{dataUrl=canvas.toDataURL('image/jpeg',0.86)}catch(err){
-      if(err.name==='SecurityError')throw Error('這張圖片有跨網域讀取限制（CORS），Safari 禁止取得像素，因此無法直接 OCR。這不是 API Key 錯誤；目前版本無法保證在該網站使用。');
-      throw err;
+    if(!ctx)throw Error('Safari 無法建立 Canvas 2D 繪圖環境。');
+    function draw(image){
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
+      ctx.drawImage(image,sx,sy,sw,sh,0,0,canvas.width,canvas.height);
+      return canvas.toDataURL('image/jpeg',0.86);
     }
-    return {img,source,canvas,dataUrl};
+    try{
+      return {img,source,canvas,dataUrl:draw(img)};
+    } catch(err){
+      if(err.name!=='SecurityError')throw err;
+    }
+
+    status('此圖片禁止 Canvas 直接讀取，嘗試透過 Userscripts 重新取得圖片…');
+    let url;
+    try{
+      url=new URL(img.currentSrc||img.src,document.baseURI);
+      if(!['https:','http:'].includes(url.protocol))throw Error('不是可重新讀取的 http(s) 圖片。');
+    }catch(err){throw Error('圖片有 CORS 限制，且無法取得可重新載入的圖片網址：'+err.message);}
+    let res;
+    try{
+      res=await GM.xmlHttpRequest({method:'GET',url:url.href,responseType:'arraybuffer',timeout:30000});
+    }catch(err){
+      throw Error('圖片有 CORS 限制；Userscripts 再次讀取也失敗（可能沒有圖片網域權限或來源限制）：'+String(err.message||err));
+    }
+    if(res.status<200||res.status>=300){
+      throw Error(`圖片有 CORS 限制；Userscripts 重新讀取回傳 HTTP ${res.status}。網站可能需要登入憑證或限制圖片直接存取。`);
+    }
+    const raw=res.response;
+    let blob;
+    const header=(res.responseHeaders||'').match(/^content-type:\s*([^;\r\n]+)/im);
+    const mime=(header?header[1]:'image/jpeg').toLowerCase();
+    if(!/^image\/(?:jpeg|png|webp|gif|avif|bmp)$/.test(mime)){
+      throw Error('圖片重新讀取的內容不是支援的圖片格式（'+mime+'），可能是網站驗證頁。');
+    }
+    if(raw instanceof Blob){blob=raw;}
+    else if(raw instanceof ArrayBuffer||ArrayBuffer.isView(raw)){
+      blob=new Blob([raw],{type:mime});
+    }else{
+      throw Error('Userscripts 無法回傳圖片二進位資料。請更新 Userscripts App。');
+    }
+    if(!blob.size||blob.size>12*1024*1024)throw Error('圖片資料為空或超過 12MB 安全限制。');
+    const objectUrl=URL.createObjectURL(blob);
+    try{
+      const safeImg=await new Promise((resolve,reject)=>{
+        const el=new Image();
+        el.onload=()=>resolve(el);
+        el.onerror=()=>reject(Error('下載成功，但 Safari 無法解碼這張圖片。'));
+        el.src=objectUrl;
+      });
+      if(safeImg.naturalWidth!==img.naturalWidth||safeImg.naturalHeight!==img.naturalHeight){
+        throw Error('重新讀取的圖片尺寸與畫面不符，為避免翻譯位置錯誤已停止。');
+      }
+      status('圖片已透過 Userscripts 取得，開始辨識韓文…');
+      return {img,source,canvas,dataUrl:draw(safeImg)};
+    }finally{URL.revokeObjectURL(objectUrl);}
   }
   function parseTsv(tsv,w,h){
     if(typeof tsv!=='string')return [];
@@ -191,9 +253,8 @@
     q('#current').disabled=true;q('#choose').disabled=true;
     try{
       ensureConfig();
-      await saveSettings();
       status('正在讀取目前畫面…');
-      const capture=captureVisible(img);
+      const capture=await captureVisible(img);
       let lines=null;
       if(state.mode==='ocr'){
         lines=await recognize(capture);
@@ -220,9 +281,9 @@
       }
       if(!boxes.length)throw Error('Gemini 沒有回傳可覆蓋的中文文字框。');
       addOverlays(capture,boxes);
-      status(`完成：已在漫畫上覆蓋 ${boxes.length} 個中文文字框${isCached?'（命中快取，沒有使用新 Token）':''}。向下滑動後可再次按「翻譯目前畫面」。`);
-    } catch(err) {status('失敗：'+String(err.message||err));console.error('[K-Manga]',err);}
-    finally{state.busy=false;q('#current').disabled=false;q('#choose').disabled=false;}
+      status(`完成：已在漫畫上覆蓋 ${boxes.length} 個中文文字框${isCached?'（命中快取，沒有使用新 Token）':''}。下滑後再按「一鍵翻譯」。`);
+    } catch(err) {open();status('失敗：'+String(err.message||err));console.error('[K-Manga]',err);}
+    finally{state.busy=false;q('#current').disabled=false;q('#choose').disabled=false;q('#float').textContent='一鍵翻譯';}
   }
   function addOverlays(capture,boxes){
     state.boxesHidden=false;
