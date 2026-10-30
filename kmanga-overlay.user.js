@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         K-Manga Overlay Translator (One-Tap V2.2)
+// @name         K-Manga Overlay Translator (One-Tap V2.5)
 // @namespace    https://example.invalid/kmanga-personal
-// @version      2.2.0
+// @version      2.5.0
 // @description  在 Safari 韓漫網頁上把韓文翻成繁體中文並覆蓋對話位置（OCR/Gemini）
 // @match        https://bomtoon.com/*
 // @match        https://*.bomtoon.com/*
@@ -30,8 +30,9 @@
   window.__kmangaOverlayV2 = true;
 
   const STORAGE = 'kmanga_v2_';
-  const MODEL_OPTIONS = ['gemini-2.5-flash','gemini-2.5-flash-lite'];
-  const state = { workerUrl:'', accessToken:'', mode:'ocr', model:MODEL_OPTIONS[0], glossary:'',
+  const MODEL_OPTIONS = ['gemini-3.5-flash-lite','gemini-3.8-flash'];
+  const MODE_DEFAULTS = {ocr:'gemini-3.5-flash-lite',vision:'gemini-3.8-flash'};
+  const state = { stage:'初始化', workerUrl:'', accessToken:'', mode:'ocr', model:MODEL_OPTIONS[0], glossary:'',
     selecting:false, busy:false, worker:null, overlays:[], boxesHidden:false, stats:{requests:0,input:0,output:0,total:0}, cacheIndex:[], ready:false };
   const host = document.createElement('div');
   host.id = 'kmanga-translator-host';
@@ -49,11 +50,11 @@
   </style>
   <div class="floatrow" id="floatrow"><button class="mini" id="float" type="button">一鍵翻譯</button><button class="smallfloat" id="settings" type="button" aria-label="設定" title="設定">⚙</button></div>
   <section class="panel hidden" id="panel">
-   <header><strong>韓漫翻譯 V2.2</strong><button id="close" type="button" class="topbutton">收起 ✕</button></header>
+   <header><strong>韓漫翻譯 V2.5</strong><button id="close" type="button" class="topbutton">收起 ✕</button></header>
    <label for="url">Cloudflare Worker 網址</label><input id="url" placeholder="https://kmanga-proxy.xxx.workers.dev" inputmode="url" />
    <label for="token">ACCESS_TOKEN（不是 Gemini API Key）</label><input id="token" type="password" autocomplete="off" placeholder="輸入你在 Cloudflare 設定的存取碼" /><label class="remember"><input id="remember" type="checkbox" checked /> 在本裝置記住存取碼（不建議共用手機啟用）</label>
    <label for="mode">翻譯模式</label><select id="mode"><option value="ocr">省額度：OCR → Gemini</option><option value="vision">高品質：Gemini 看圖片</option></select>
-   <label for="model">Gemini 模型</label><select id="model"><option>gemini-2.5-flash</option><option>gemini-2.5-flash-lite</option></select>
+   <label for="model">Gemini 模型</label><select id="model"><option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite（省額度）</option><option value="gemini-3.8-flash">gemini-3.8-flash（高品質）</option></select>
    <label for="glossary">角色姓名對照（可選）</label><textarea id="glossary" placeholder="주빈=晝濱；이경=以暻"></textarea>
    <div class="buttons">
     <button id="current" class="btn" type="button">翻譯目前畫面</button><button id="choose" class="btn" type="button">點選漫畫圖片</button>
@@ -70,6 +71,10 @@
   function close() { q('#panel').classList.add('hidden'); q('#floatrow').classList.remove('hidden'); }
   q('#float').addEventListener('click',()=>{ if(!state.ready){open();status('設定尚未讀取完成，請再試一次。');return;} if(!state.workerUrl||!state.accessToken){open();status('第一次使用：請填寫 Worker 網址和 ACCESS_TOKEN，儲存一次即可。');return;} const candidates=findVisibleImages(); if(!candidates.length){open();return status('沒有找到可翻譯的漫畫圖片，請先滑到漫畫畫面。');} q('#float').textContent='翻譯中…'; translateImage(candidates[0].img); });
   q('#settings').addEventListener('click',open);
+  q('#mode').addEventListener('change',()=>{
+    q('#model').value=MODE_DEFAULTS[q('#mode').value]||MODE_DEFAULTS.ocr;
+    status('已切換模型為 '+q('#model').value+'；翻譯時會使用此模型。');
+  });
   q('#close').addEventListener('click',close);
   (document.body||document.documentElement).appendChild(host);
 
@@ -98,7 +103,7 @@
       q('#url').value=prefs.workerUrl||'';
       q('#token').value=await GM.getValue(STORAGE+'saved_access_token','');
       q('#mode').value=prefs.mode||'ocr';
-      q('#model').value=MODEL_OPTIONS.includes(prefs.model)?prefs.model:MODEL_OPTIONS[0];
+      q('#model').value=MODEL_OPTIONS.includes(prefs.model)?prefs.model:(MODE_DEFAULTS[q('#mode').value]||MODE_DEFAULTS.ocr);
       q('#glossary').value=prefs.glossary||'';
       state.stats=await GM.getValue(STORAGE+'stats',state.stats);
       state.cacheIndex=await GM.getValue(STORAGE+'index',[]);
@@ -132,6 +137,42 @@
   // First use the already-rendered image; if Safari rejects canvas export, attempt a second,
   // permissioned GET of the identical <img> URL via the Userscripts extension. No cookies,
   // authorization headers, scraping, or DRM bypass are added here.
+  // Userscripts versions differ: some expose callback-based GM.xmlHttpRequest,
+  // while others also return a Promise. Support both without confusing an abort
+  // handle with a response object. Never read private site cookies/credentials.
+  function gmRequest(options){
+    return new Promise((resolve,reject)=>{
+      let settled=false;
+      const t=setTimeout(()=>finish(Error('Userscripts 跨網站請求逾時：請檢查 Safari 擴充功能權限與網路連線。')), (options.timeout||30000)+5000);
+      function finish(error,response){
+        if(settled)return;
+        settled=true;clearTimeout(t);
+        if(error)reject(error);
+        else resolve(response);
+      }
+      const request={...options,
+        onload:(r)=>finish(null,r),
+        onerror:(e)=>finish(Error('Userscripts 請求錯誤：'+describeError(e))),
+        ontimeout:()=>finish(Error('Userscripts 請求逾時')),
+        onabort:()=>finish(Error('Userscripts 請求已取消'))
+      };
+      try{
+        const result=GM.xmlHttpRequest(request);
+        if(result&&typeof result.then==='function'){
+          result.then(r=>{ if(r&&typeof r.status==='number')finish(null,r); },e=>finish(e));
+        }
+      }catch(e){finish(e)}
+    });
+  }
+  function describeError(err){
+    if(!err)return '未知錯誤';
+    if(typeof err==='string')return err;
+    const name=err.name&&err.name!=='Error'?String(err.name)+': ':'';
+    return name+String(err.message||err.error||err.statusText||err);
+  }
+  function isSafariSecurityError(err){
+    return err?.name==='SecurityError'||/the operation is insecure|tainted|cross.origin|not allowed to access/i.test(describeError(err));
+  }
   async function captureVisible(img){
     const r=img.getBoundingClientRect();
     if(!r.width||!r.height||!img.naturalWidth||!img.naturalHeight)throw Error('圖片尚未載入完成。');
@@ -154,7 +195,7 @@
     try{
       return {img,source,canvas,dataUrl:draw(img)};
     } catch(err){
-      if(err.name!=='SecurityError')throw err;
+      if(!isSafariSecurityError(err))throw err;
     }
 
     status('此圖片禁止 Canvas 直接讀取，嘗試透過 Userscripts 重新取得圖片…');
@@ -165,9 +206,9 @@
     }catch(err){throw Error('圖片有 CORS 限制，且無法取得可重新載入的圖片網址：'+err.message);}
     let res;
     try{
-      res=await GM.xmlHttpRequest({method:'GET',url:url.href,responseType:'arraybuffer',timeout:30000});
+      res=await gmRequest({method:'GET',url:url.href,responseType:'arraybuffer',timeout:30000});
     }catch(err){
-      throw Error('圖片有 CORS 限制；Userscripts 再次讀取也失敗（可能沒有圖片網域權限或來源限制）：'+String(err.message||err));
+      throw Error('圖片有 CORS 限制；Userscripts 再次讀取也失敗。請確認 Safari 已允許 Userscripts 存取圖片網域。原始錯誤：'+describeError(err));
     }
     if(res.status<200||res.status>=300){
       throw Error(`圖片有 CORS 限制；Userscripts 重新讀取回傳 HTTP ${res.status}。網站可能需要登入憑證或限制圖片直接存取。`);
@@ -201,28 +242,55 @@
       return {img,source,canvas,dataUrl:draw(safeImg)};
     }finally{URL.revokeObjectURL(objectUrl);}
   }
-  function parseTsv(tsv,w,h){
+  function parseTsv(tsv,w,h,minConfidence=20){
     if(typeof tsv!=='string')return [];
     const rows=tsv.trim().split(/\r?\n/).slice(1);
     const groups=new Map();
     for(const row of rows){const c=row.split('\t');if(c.length<12||Number(c[0])!==5)continue;
       const word=c.slice(11).join('\t').trim();if(!word||!/[\u3131-\u318E\uAC00-\uD7A3]/.test(word))continue;
       const left=+c[6],top=+c[7],ww=+c[8],hh=+c[9],confidence=+c[10];
-      if(![left,top,ww,hh].every(Number.isFinite)||ww<=0||hh<=0||confidence<20)continue;
+      if(![left,top,ww,hh].every(Number.isFinite)||ww<=0||hh<=0||confidence<minConfidence)continue;
       const key=[c[2],c[3],c[4]].join('-');
       if(!groups.has(key))groups.set(key,{text:[],x1:Infinity,y1:Infinity,x2:0,y2:0});
       const g=groups.get(key);g.text.push(word);g.x1=Math.min(g.x1,left);g.y1=Math.min(g.y1,top);g.x2=Math.max(g.x2,left+ww);g.y2=Math.max(g.y2,top+hh);
     }
     return [...groups.values()].filter(g=>g.text.join('').length>=2).sort((a,b)=>a.y1-b.y1||a.x1-b.x1).slice(0,35).map((g,i)=>({id:String(i),text:g.text.join(' '),bbox:[g.x1/w,g.y1/h,g.x2/w,g.y2/h]}));
   }
+  // hOCR is an alternate Tesseract positional output when TSV rows are missing,
+  // or too low confidence for the stricter TSV parser. Use text-line bboxes;
+  // never invent a bbox from the plain OCR string.
+  function parseHocr(hocr,w,h){
+    if(typeof hocr!=='string'||!hocr.trim())return [];
+    let doc;
+    try{doc=new DOMParser().parseFromString(hocr,'text/html');}
+    catch{return [];}
+    const nodes=[...doc.querySelectorAll('.ocr_line,.ocrx_line')];
+    const lines=[];
+    for(const el of nodes){
+      const title=el.getAttribute('title')||'';
+      const m=title.match(/\bbbox\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/i);
+      const korean=(el.textContent||'').replace(/\s+/g,' ').trim();
+      if(!m||!/[\u3131-\u318E\uAC00-\uD7A3]/.test(korean))continue;
+      const [x1,y1,x2,y2]=m.slice(1).map(Number);
+      if(!(x2>x1&&y2>y1))continue;
+      lines.push({text:korean,bbox:[x1/w,y1/h,x2/w,y2/h]});
+    }
+    return lines.sort((a,b)=>a.bbox[1]-b.bbox[1]||a.bbox[0]-b.bbox[0]).slice(0,35)
+      .map((line,i)=>({id:String(i),...line}));
+  }
   async function recognize(capture){
     const engine=typeof Tesseract!=='undefined'?Tesseract:window.Tesseract;
     if(!engine||typeof engine.createWorker!=='function')throw Error('OCR 套件未載入。請確認 Userscripts 的 @require 有下載 Tesseract.js。');
     if(!state.worker){status('第一次使用：正在下載韓文 OCR 模型…');state.worker=await engine.createWorker('kor');}
     status('正在辨識畫面中的韓文與文字座標…');
-    const response=await state.worker.recognize(capture.dataUrl,{}, {tsv:true,text:true});
-    let lines=parseTsv(response.data.tsv,capture.canvas.width,capture.canvas.height);
-    if(!lines.length && /[\uAC00-\uD7A3]/.test(response.data.text||''))throw Error('已辨識到韓文，但無法取得文字框位置；請試高品質模式。');
+    // v5 supports requesting additional positional formats explicitly.
+    const response=await state.worker.recognize(capture.dataUrl,{}, {tsv:true,hocr:true,text:true});
+    const {tsv,hocr,text=''}=response.data||{};
+    let lines=parseTsv(tsv,capture.canvas.width,capture.canvas.height,20);
+    if(!lines.length)lines=parseTsv(tsv,capture.canvas.width,capture.canvas.height,0);
+    if(!lines.length)lines=parseHocr(hocr,capture.canvas.width,capture.canvas.height);
+    if(!lines.length && /[\uAC00-\uD7A3]/.test(text))
+      throw Error('已辨識韓文，但 TSV/hOCR 沒有可用的文字座標。可改用「Gemini 看圖片」模式；若重新載入仍失敗，請提供錯誤訊息。');
     return lines;
   }
   function cacheHash(text){let h=2166136261;for(let i=0;i<text.length;i++){h^=text.charCodeAt(i);h=Math.imul(h,16777619)}return (h>>>0).toString(36)+'_'+text.length;}
@@ -241,10 +309,10 @@
   async function postWorker(body){
     // GM.xmlHttpRequest is the Userscripts extension's cross-site request bridge.
     // The Worker still requires ACCESS_TOKEN and may check allowed Origins.
-    const res=await GM.xmlHttpRequest({url:state.workerUrl+'/overlay',method:'POST',responseType:'text',timeout:90000,
+    const res=await gmRequest({url:state.workerUrl+'/overlay',method:'POST',responseType:'text',timeout:90000,
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+state.accessToken},data:JSON.stringify(body)});
     let data;try{data=JSON.parse(res.responseText||res.response||'{}')}catch{throw Error('Worker 沒有回傳 JSON，HTTP '+res.status)}
-    if(res.status<200||res.status>=300)throw Error(data.error||`Worker HTTP ${res.status}`);
+    if(res.status<200||res.status>=300)throw Error(`[${state.model}] ${data.error||`Worker HTTP ${res.status}`}`);
     return data;
   }
   async function translateImage(img){
@@ -252,24 +320,30 @@
     state.busy=true;
     q('#current').disabled=true;q('#choose').disabled=true;
     try{
+      state.stage='確認連線設定';
       ensureConfig();
+      state.stage='擷取漫畫圖片';
       status('正在讀取目前畫面…');
       const capture=await captureVisible(img);
       let lines=null;
       if(state.mode==='ocr'){
+        state.stage='辨識韓文 OCR';
         lines=await recognize(capture);
         if(!lines.length)throw Error('沒有找到清晰的韓文。可改用「Gemini 看圖片」模式。');
       }
+      state.stage='計算翻譯快取';
       const key=await cacheKey(capture,lines);
       let data=await getCache(key);
       const isCached=!!data;
       if(!data){
-        status('正在呼叫 Gemini 翻譯…');
+        state.stage='透過 Userscripts 呼叫 Cloudflare Worker';
+        status('正在呼叫 Gemini 翻譯…\n實際送出模型：'+state.model);
         const request={mode:state.mode,model:state.model,glossary:state.glossary};
         if(state.mode==='ocr')request.lines=lines.map(({id,text})=>({id,text}));
         else {request.mimeType='image/jpeg';request.imageBase64=capture.dataUrl.split(',')[1];}
         data=await postWorker(request);
         usageTotals(data.usage);
+        state.stage='儲存翻譯快取';
         await putCache(key,{translations:data.translations||null,boxes:data.boxes||null});
       }
       let boxes=[];
@@ -280,9 +354,10 @@
         boxes=(data.boxes||[]).filter(b=>Array.isArray(b.bbox)&&b.bbox.length===4).map(b=>({bbox:b.bbox.map(n=>Math.max(0,Math.min(1,+n/1000))),text:b.text,zh:b.zh}));
       }
       if(!boxes.length)throw Error('Gemini 沒有回傳可覆蓋的中文文字框。');
+      state.stage='在漫畫上繪製中文覆蓋框';
       addOverlays(capture,boxes);
       status(`完成：已在漫畫上覆蓋 ${boxes.length} 個中文文字框${isCached?'（命中快取，沒有使用新 Token）':''}。下滑後再按「一鍵翻譯」。`);
-    } catch(err) {open();status('失敗：'+String(err.message||err));console.error('[K-Manga]',err);}
+    } catch(err) {open();status('失敗位置：'+state.stage+'\n錯誤：'+describeError(err)+'\n'+(isSafariSecurityError(err)?'Safari 拒絕某項安全受限操作。請確認 Userscripts 已允許目前網站；如果在「擷取漫畫圖片」階段失敗，可能是圖片來源限制，不是 Gemini Key 的問題。':'請依失敗位置確認網路、權限或設定。'));console.error('[K-Manga] stage:',state.stage,err);}
     finally{state.busy=false;q('#current').disabled=false;q('#choose').disabled=false;q('#float').textContent='一鍵翻譯';}
   }
   function addOverlays(capture,boxes){
